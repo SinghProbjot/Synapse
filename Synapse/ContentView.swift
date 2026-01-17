@@ -1,56 +1,165 @@
 import SwiftUI
 import UIKit
+import CoreBluetooth
 
-// LOGIC ENGINE ---
-// Questa classe gestirà tutte le comunicazioni.
-// Per ora simula le azioni stampandole nella Console di Xcode.
-class SynapseEngine: ObservableObject {
+// --- COSTANTI GLOBALI (LA "STRETTA DI MANO SEGRETA") ---
+// Questi UUID devono coincidere ESATTAMENTE con quelli che metteremo nell'ESP32
+let SYNAPSE_SERVICE_UUID = CBUUID(string: "4fafc201-1fb5-459e-8fcc-c5c9c331914b")
+let SYNAPSE_CHAR_UUID    = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26a8")
+
+// --- 0. IL CERVELLO REALE (CORE BLUETOOTH ENGINE) ---
+class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    
+    // Variabili Pubbliche per la UI
     @Published var isConnected = false
     @Published var connectionStatus = "DISCONNECTED"
+    @Published var bluetoothState = "UNKNOWN"
     
-    // Funzione per connettere (Simulazione)
+    // Variabili Interne CoreBluetooth
+    private var centralManager: CBCentralManager!
+    private var synapsePeripheral: CBPeripheral?
+    private var inputCharacteristic: CBCharacteristic?
+    
+    override init() {
+        super.init()
+        // Inizializza il gestore Bluetooth del telefono
+        centralManager = CBCentralManager(delegate: self, queue: nil)
+    }
+    
+    // --- AZIONI UTENTE ---
+    
     func toggleConnection() {
         if isConnected {
-            isConnected = false
-            connectionStatus = "DISCONNECTED"
-            print("[BLE] Disconnesso.")
+            disconnect()
         } else {
-            // Qui andrà la scansione Bluetooth reale
-            isConnected = true
-            connectionStatus = "CONNECTED TO ESP32-S3"
-            print("[BLE] Connesso al dispositivo Synapse.")
+            startScanning()
         }
     }
     
-    // Invia un tasto singolo
+    func startScanning() {
+        guard centralManager.state == .poweredOn else {
+            connectionStatus = "BLUETOOTH OFF"
+            return
+        }
+        
+        connectionStatus = "SCANNING..."
+        print("[BLE] Inizio scansione per UUID: \(SYNAPSE_SERVICE_UUID)")
+        
+        // IL FILTRO MAGICO: Cerca SOLO dispositivi con il nostro Service UUID
+        centralManager.scanForPeripherals(withServices: [SYNAPSE_SERVICE_UUID], options: nil)
+    }
+    
+    func disconnect() {
+        if let p = synapsePeripheral {
+            centralManager.cancelPeripheralConnection(p)
+        }
+        connectionStatus = "DISCONNECTING..."
+    }
+    
+    // --- INVIO DATI REALE ---
+    
     func sendKey(_ key: String) {
-        print("[ACTION] Tasto premuto: \(key)")
-        // TODO: Inserire qui codice: peripheral.writeValue(key...)
+        guard isConnected, let characteristic = inputCharacteristic, let peripheral = synapsePeripheral else {
+            print("[BLE ERROR] Non connesso o caratteristica non trovata per: \(key)")
+            return
+        }
+        
+        // Convertiamo la stringa in dati (questo cambierà quando definiremo il protocollo esatto)
+        if let data = key.data(using: .utf8) {
+            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            print("[BLE SENT] \(key)")
+        }
     }
     
-    // Invia una Macro
     func triggerMacro(id: Int) {
-        print("[MACRO] Eseguita Macro #\(id)")
+        sendKey("MACRO:\(id)")
     }
     
-    // Invia click del mouse
     func sendClick(type: String) {
-        print("[MOUSE] Click: \(type)")
+        sendKey("CLICK:\(type)")
     }
     
-    // Attiva/Disattiva funzioni Magic
     func toggleFeature(name: String, active: Bool) {
-        print("[MAGIC] Funzione \(name) impostata su: \(active)")
+        sendKey("CFG:\(name):\(active ? 1 : 0)")
+    }
+    
+    // --- DELEGATI CORE BLUETOOTH (Cosa succede "sotto il cofano") ---
+    
+    // 1. Monitoraggio stato antenna Bluetooth
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        switch central.state {
+        case .poweredOn:
+            bluetoothState = "ON"
+            print("[BLE STATE] Bluetooth acceso. Pronto.")
+        case .poweredOff:
+            bluetoothState = "OFF"
+            connectionStatus = "TURN ON BT"
+            isConnected = false
+        case .unauthorized:
+            connectionStatus = "NO PERMISSION"
+        default:
+            connectionStatus = "ERROR"
+        }
+    }
+    
+    // 2. Trovato un dispositivo!
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+        print("[BLE] Trovato dispositivo Synapse: \(peripheral.name ?? "Unknown")")
+        
+        // Smettiamo di cercare (risparmia batteria)
+        centralManager.stopScan()
+        
+        // Salviamo il riferimento e connettiamo
+        synapsePeripheral = peripheral
+        synapsePeripheral?.delegate = self
+        centralManager.connect(peripheral, options: nil)
+        connectionStatus = "CONNECTING..."
+    }
+    
+    // 3. Connessione avvenuta
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        isConnected = true
+        connectionStatus = "CONNECTED"
+        print("[BLE] Connesso! Cerco i servizi...")
+        peripheral.discoverServices([SYNAPSE_SERVICE_UUID])
+    }
+    
+    // 4. Disconnessione (o errore)
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        isConnected = false
+        connectionStatus = "DISCONNECTED"
+        synapsePeripheral = nil
+        print("[BLE] Disconnesso.")
+    }
+    
+    // 5. Servizi trovati, ora cerchiamo la "Caratteristica" di scrittura
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard let services = peripheral.services else { return }
+        for service in services {
+            if service.uuid == SYNAPSE_SERVICE_UUID {
+                print("[BLE] Servizio Synapse trovato. Cerco caratteristiche...")
+                peripheral.discoverCharacteristics([SYNAPSE_CHAR_UUID], for: service)
+            }
+        }
+    }
+    
+    // 6. Caratteristica trovata! Siamo pronti a scrivere.
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard let characteristics = service.characteristics else { return }
+        for char in characteristics {
+            if char.uuid == SYNAPSE_CHAR_UUID {
+                print("[BLE] Canale di scrittura aperto! READY.")
+                inputCharacteristic = char
+            }
+        }
     }
 }
 
-// --- STRUTTURA PRINCIPALE (TAB BAR) ---
+// --- 1. STRUTTURA UI (UI Rimasta quasi identica, cambia solo il collegamento al motore) ---
 struct ContentView: View {
-    // Creiamo un'istanza condivisa del motore
     @StateObject var engine = SynapseEngine()
     
     init() {
-        // Look "Stealth" per la TabBar
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
         appearance.backgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1.0)
@@ -79,11 +188,11 @@ struct ContentView: View {
                 .tabItem { Label("Core", systemImage: "cpu") }
         }
         .preferredColorScheme(.dark)
-        .accentColor(Color(red: 0.0, green: 0.85, blue: 0.95)) // "Synapse Cyan"
+        .accentColor(Color(red: 0.0, green: 0.85, blue: 0.95))
     }
 }
 
-// ---  DASHBOARD ---
+// --- 2. DASHBOARD ---
 struct DashboardView: View {
     @ObservedObject var engine: SynapseEngine
     
@@ -94,15 +203,39 @@ struct DashboardView: View {
                 
                 ScrollView {
                     VStack(spacing: 25) {
-                        // Header
-                        HStack {
+                        // Header con LOGO
+                        HStack(spacing: 15) {
+                            // --- INIZIO LOGO ---
+                            ZStack {
+                                // Cerchio di sfondo con gradiente Cyber
+                                Circle()
+                                    .fill(LinearGradient(colors: [.cyan.opacity(0.3), .blue.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                    .frame(width: 50, height: 50)
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.cyan.opacity(0.5), lineWidth: 1)
+                                    )
+                                
+                                // Icona (Sinapsi/Cervello)
+                                // Se vuoi usare una tua immagine PNG, commenta la riga sotto e usa:
+                                // Image("IlTuoLogo").resizable().aspectRatio(contentMode: .fit).frame(width: 30)
+                                Image(systemName: "brain.head.profile")
+                                    .font(.system(size: 26))
+                                    .foregroundColor(.cyan)
+                                    .shadow(color: .cyan, radius: 3)
+                            }
+                            // --- FINE LOGO ---
+
                             Text("SYNAPSE")
                                 .font(.system(size: 30, weight: .heavy, design: .monospaced))
                                 .tracking(2)
                                 .foregroundColor(.white)
+                            
                             Spacer()
+                            
+                            // Pallino di stato (spostato a destra)
                             Circle()
-                                .fill(engine.isConnected ? Color.green : Color.red)
+                                .fill(engine.isConnected ? Color.green : (engine.connectionStatus.contains("SCAN") ? Color.orange : Color.red))
                                 .frame(width: 10, height: 10)
                                 .shadow(color: engine.isConnected ? .green : .red, radius: 5)
                         }
@@ -125,12 +258,14 @@ struct DashboardView: View {
                                         .foregroundColor(.gray)
                                         .tracking(1)
                                     
-                                    Text(engine.isConnected ? "ONLINE" : "OFFLINE")
+                                    Text(engine.connectionStatus)
                                         .font(.title2)
                                         .fontWeight(.bold)
-                                        .foregroundColor(engine.isConnected ? .green : .gray)
+                                        .foregroundColor(getStatusColor())
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.5)
                                     
-                                    Text(engine.connectionStatus)
+                                    Text(engine.isConnected ? "Target: Synapse Dongle" : "UUID Filter Active")
                                         .font(.caption)
                                         .foregroundColor(.white.opacity(0.7))
                                 }
@@ -141,7 +276,7 @@ struct DashboardView: View {
                                 }) {
                                     Image(systemName: "bolt.horizontal.circle.fill")
                                         .font(.system(size: 40))
-                                        .foregroundColor(engine.isConnected ? .yellow : .gray.opacity(0.3))
+                                        .foregroundColor(getButtonColor())
                                 }
                             }
                             .padding(20)
@@ -170,6 +305,19 @@ struct DashboardView: View {
             }
             .navigationBarHidden(true)
         }
+    }
+    
+    // Helper colors
+    func getStatusColor() -> Color {
+        if engine.isConnected { return .green }
+        if engine.connectionStatus.contains("SCAN") { return .orange }
+        return .gray
+    }
+    
+    func getButtonColor() -> Color {
+        if engine.isConnected { return .yellow }
+        if engine.connectionStatus.contains("SCAN") { return .orange.opacity(0.5) }
+        return .gray.opacity(0.3)
     }
 }
 
@@ -207,7 +355,7 @@ struct SynapseWidget: View {
     }
 }
 
-// ---  INPUT ---
+// --- 3. INPUT ---
 struct InputView: View {
     @ObservedObject var engine: SynapseEngine
     @State private var inputMode = 0
@@ -225,7 +373,6 @@ struct InputView: View {
                 .background(Color.black)
                 
                 if inputMode == 0 {
-                    // Placeholder Tastiera
                     Spacer()
                     Image(systemName: "keyboard.badge.ellipsis")
                         .font(.system(size: 80))
@@ -246,7 +393,6 @@ struct InputView: View {
                     .padding()
                     
                 } else {
-                    // Trackpad Area
                     ZStack {
                         RoundedRectangle(cornerRadius: 10)
                             .fill(Color(white: 0.05))
@@ -254,8 +400,8 @@ struct InputView: View {
                             .gesture(
                                 DragGesture()
                                     .onChanged { value in
-                                        // Simulazione invio coordinate mouse
-                                        print("[MOUSE] X:\(value.translation.width) Y:\(value.translation.height)")
+                                        print("[MOUSE LOGIC] Invio coordinate delta: \(value.translation)")
+                                        // Qui implementeremo l'invio binario delle coordinate
                                     }
                             )
                         
@@ -283,7 +429,7 @@ struct InputView: View {
     }
 }
 
-// ---  MAGIC ---
+// --- 4. MAGIC ---
 struct MagicView: View {
     @ObservedObject var engine: SynapseEngine
     
@@ -403,7 +549,6 @@ struct SettingsView: View {
                     }
                 }
                 
-                // --- CREDITI E GITHUB ---
                 Section(header: Text("CREDITS")) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Developed by Singh Probjot")

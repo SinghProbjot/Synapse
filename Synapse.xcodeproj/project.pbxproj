@@ -12,6 +12,7 @@
 		DD044D142F16DE670000E332 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DD044D132F16DE670000E332 /* Assets.xcassets */; };
 		DD044D172F16DE670000E332 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DD044D162F16DE670000E332 /* Preview Assets.xcassets */; };
 		DD044D1E2F16E37F0000E332 /* .gitignore in Resources */ = {isa = PBXBuildFile; fileRef = DD044D1D2F16E37F0000E332 /* .gitignore */; };
+		DD3EA9622F1C0FD4002A6848 /* ReadMe.md in Resources */ = {isa = PBXBuildFile; fileRef = DD3EA9612F1C0FCB002A6848 /* ReadMe.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +22,8 @@
 		DD044D132F16DE670000E332 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DD044D162F16DE670000E332 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DD044D1D2F16E37F0000E332 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		DD3EA9602F1C04AA002A6848 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		DD3EA9612F1C0FCB002A6848 /* ReadMe.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ReadMe.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -53,6 +56,8 @@
 		DD044D0E2F16DE660000E332 /* Synapse */ = {
 			isa = PBXGroup;
 			children = (
+				DD3EA9612F1C0FCB002A6848 /* ReadMe.md */,
+				DD3EA9602F1C04AA002A6848 /* Info.plist */,
 				DD044D0F2F16DE660000E332 /* SynapseApp.swift */,
 				DD044D112F16DE660000E332 /* ContentView.swift */,
 				DD044D132F16DE670000E332 /* Assets.xcassets */,
@@ -130,6 +135,7 @@
 			files = (
 				DD044D172F16DE670000E332 /* Preview Assets.xcassets in Resources */,
 				DD044D1E2F16E37F0000E332 /* .gitignore in Resources */,
+				DD3EA9622F1C0FD4002A6848 /* ReadMe.md in Resources */,
 				DD044D142F16DE670000E332 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -278,11 +284,15 @@
 				DEVELOPMENT_ASSET_PATHS = "\"Synapse/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Synapse/Info.plist;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "to connect to synapse USB dongle";
+				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "to connect to Synapse USB dongle";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -306,11 +316,15 @@
 				DEVELOPMENT_ASSET_PATHS = "\"Synapse/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Synapse/Info.plist;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "to connect to synapse USB dongle";
+				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "to connect to Synapse USB dongle";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
