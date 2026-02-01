@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import CoreBluetooth
 import CoreMotion
+import AVFoundation
 
 // --- COSTANTI ---
 let SYNAPSE_SERVICE_UUID = CBUUID(string: "4fafc201-1fb5-459e-8fcc-c5c9c331914b")
@@ -15,19 +16,30 @@ class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
     @Published var logs: [String] = ["System Ready."]
     @Published var rssiLevel: Int = 0
     
+    // STATI FUNZIONALITÀ
+    @Published var isJigglerActive = false
+    @Published var isGyroActive = false
+    @Published var isProximityActive = false
+    
+    // CONFIGURAZIONI UTENTE (Salvataggio automatico)
+    @AppStorage("targetOS") var targetOS: String = "Windows" // "Windows" o "Mac"
+    @AppStorage("userEmail") var userEmail: String = ""
+    @AppStorage("gyroSensitivity") var gyroSensitivity: Double = 50.0
+    @AppStorage("invertGyroX") var invertGyroX: Bool = false
+    @AppStorage("invertGyroY") var invertGyroY: Bool = false
+    
     private var centralManager: CBCentralManager!
     private var synapsePeripheral: CBPeripheral?
     private var inputCharacteristic: CBCharacteristic?
     
     // Sensori
     private let motionManager = CMMotionManager()
-    @Published var isGyroActive = false
-    @Published var isProximityActive = false
     private var rssiTimer: Timer?
     
-    // Variabili per fluidità Gyro (Accumulatori)
+    // Variabili tecniche Gyro
     private var gyroResidualX: Double = 0.0
     private var gyroResidualY: Double = 0.0
+    private var debugCounter = 0
     
     override init() {
         super.init()
@@ -39,7 +51,7 @@ class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
         DispatchQueue.main.async {
             let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             self.logs.insert("[\(time)] \(msg)", at: 0)
-            if self.logs.count > 50 { self.logs.removeLast() }
+            if self.logs.count > 100 { self.logs.removeLast() }
         }
     }
     
@@ -66,6 +78,38 @@ class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
         }
     }
     
+    // Funzione intelligente per inviare frasi intere (Bulk)
+    func sendText(_ text: String) {
+        log("📝 Typing bulk text...")
+        for (index, char) in text.enumerated() {
+            // Piccolo delay tra i caratteri per non intasare il buffer
+            DispatchQueue.main.asyncAfter(deadline: .now() + (Double(index) * 0.02)) {
+                self.sendKey(String(char))
+            }
+        }
+    }
+    
+    // Gestione Shortcuts OS-Specifiche
+    func sendShortcut(_ action: String) {
+        if action == "CLOSE_APP" {
+            if targetOS == "Windows" { sendKey("KEY:ALT+F4") }
+            else { sendKey("KEY:WIN+Q") } // Su tastiera PC, WIN è Command. Quindi WIN+Q = CMD+Q
+        }
+        else if action == "LOCK_PC" {
+            if targetOS == "Windows" { sendKey("KEY:WIN+L") }
+            else {
+                // Mac Lock è CTRL+CMD+Q. Firmware attuale supporta solo WIN+L.
+                // Usiamo un workaround o mappiamo WIN+L a Lock anche su Mac (via impostazioni sistema Mac)
+                sendKey("KEY:WIN+L")
+            }
+        }
+        else if action == "COPY" {
+            // Nota: Firmware attuale non ha COPY preimpostato, inviamo combinazione se possibile
+            // Per ora placeholder
+            log("Copy command sent")
+        }
+    }
+    
     func sendMouseMove(x: Int, y: Int) {
         if x == 0 && y == 0 { return }
         sendKey("MOVE:\(x):\(y)")
@@ -73,44 +117,37 @@ class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
     
     func sendClick(type: String) { sendKey("CLICK:\(type)") }
     
-    // --- MAGIC FEATURES ---
+    // --- FEATURES ---
     
-    // 1. Gyro Mouse (Fixato e Potenziato)
     func toggleGyro(active: Bool) {
         isGyroActive = active
         if active {
-            log("🌀 Gyro ON"); startGyro()
+            log("🌀 Gyro ON")
+            startGyro()
         } else {
-            log("🛑 Gyro OFF"); stopGyro()
+            log("🛑 Gyro OFF")
+            stopGyro()
         }
     }
     
     private func startGyro() {
         guard motionManager.isDeviceMotionAvailable else { log("⚠️ No Gyro Sensor"); return }
-        
-        // Aumentiamo frequenza aggiornamento per fluidità (60Hz)
         motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
-        
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] (data, error) in
             guard let self = self, let data = data else { return }
+            let sensitivity = self.gyroSensitivity
+            let multX = self.invertGyroX ? -1.0 : 1.0
+            let multY = self.invertGyroY ? -1.0 : 1.0
             
-            // Sensibilità aumentata
-            let sensitivity: Double = 40.0
+            let rawX = data.rotationRate.y * sensitivity * multX
+            let rawY = data.rotationRate.x * sensitivity * multY
             
-            // Calcolo grezzo
-            // Nota: RotationRate Y è solitamente l'asse orizzontale (Yaw/Roll) quando si tiene il telefono verticale
-            let rawX = data.rotationRate.y * sensitivity
-            let rawY = data.rotationRate.x * sensitivity
-            
-            // Aggiungiamo il residuo precedente (per non perdere i movimenti lenti)
             let totalX = rawX + self.gyroResidualX
             let totalY = rawY + self.gyroResidualY
             
-            // Estraiamo la parte intera da inviare
             let sendX = Int(totalX)
             let sendY = Int(totalY)
             
-            // Salviamo il resto per il prossimo frame
             self.gyroResidualX = totalX - Double(sendX)
             self.gyroResidualY = totalY - Double(sendY)
             
@@ -121,32 +158,29 @@ class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
     }
     private func stopGyro() {
         motionManager.stopDeviceMotionUpdates()
-        gyroResidualX = 0
-        gyroResidualY = 0
+        gyroResidualX = 0; gyroResidualY = 0
     }
     
-    // 2. Jiggler
-    func toggleJiggler(active: Bool) {
-        sendKey("CFG:Jiggler:\(active ? 1 : 0)")
-        log(active ? "☕️ Jiggler ON" : "💤 Jiggler OFF")
+    func toggleJiggler() {
+        isJigglerActive.toggle()
+        sendKey("CFG:Jiggler:\(isJigglerActive ? 1 : 0)")
+        log(isJigglerActive ? "☕️ Jiggler ACTIVE" : "💤 Jiggler STOPPED")
     }
     
-    // 3. Proximity Monitor
     func toggleProximity(active: Bool) {
         isProximityActive = active
         if active {
-            log("📡 Proximity Monitor ON")
+            log("📡 Proximity ON")
             rssiTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
                 self.synapsePeripheral?.readRSSI()
             }
         } else {
-            log("📡 Proximity Monitor OFF")
+            log("📡 Proximity OFF")
             rssiTimer?.invalidate()
-            rssiTimer = nil
         }
     }
 
-    // --- DELEGATI ---
+    // --- DELEGATI BLE ---
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOff { isConnected = false; connectionStatus = "TURN ON BT" }
     }
@@ -164,7 +198,7 @@ class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
         peripheral.discoverServices([SYNAPSE_SERVICE_UUID])
     }
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        isConnected = false; connectionStatus = "DISCONNECTED"; stopGyro(); rssiTimer?.invalidate()
+        isConnected = false; connectionStatus = "DISCONNECTED"; stopGyro(); rssiTimer?.invalidate(); isJigglerActive = false
         log("❌ Disconnected")
     }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -188,13 +222,33 @@ class SynapseEngine: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
         rssiLevel = RSSI.intValue
         if isProximityActive && rssiLevel < -85 {
             log("🔒 Utente lontano (\(rssiLevel)). Blocco PC.")
-            sendKey("KEY:WIN+L")
+            sendShortcut("LOCK_PC")
             toggleProximity(active: false)
         }
     }
 }
 
-// --- UI ---
+// --- VOLUME LISTENER ---
+class VolumeObserver: NSObject, ObservableObject {
+    @Published var volume: Float = 0.0
+    private var audioSession = AVAudioSession.sharedInstance()
+    private var observer: NSKeyValueObservation?
+    var onVolumeUp: (() -> Void)?; var onVolumeDown: (() -> Void)?
+    override init() {
+        super.init()
+        do { try audioSession.setCategory(.ambient, options: .mixWithOthers); try audioSession.setActive(true) } catch {}
+        volume = audioSession.outputVolume
+        observer = audioSession.observe(\.outputVolume) { [weak self] (session, _) in
+            guard let self = self else { return }
+            let newVol = session.outputVolume
+            if newVol > self.volume { self.onVolumeUp?() } else if newVol < self.volume { self.onVolumeDown?() } else { if newVol == 1.0 { self.onVolumeUp?() }; if newVol == 0.0 { self.onVolumeDown?() } }
+            self.volume = newVol
+        }
+    }
+    deinit { observer?.invalidate() }
+}
+
+// --- UI PRINCIPALE ---
 struct ContentView: View {
     @StateObject var engine = SynapseEngine()
     
@@ -224,6 +278,7 @@ struct ContentView: View {
     }
 }
 
+// --- DASHBOARD ---
 struct DashboardView: View {
     @ObservedObject var engine: SynapseEngine
     var body: some View {
@@ -234,10 +289,7 @@ struct DashboardView: View {
                     VStack(spacing: 25) {
                         HStack(spacing: 15) {
                             ZStack {
-                                Circle()
-                                    .fill(LinearGradient(colors: [.cyan.opacity(0.3), .blue.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                    .frame(width: 50, height: 50)
-                                    .overlay(Circle().stroke(Color.cyan.opacity(0.5), lineWidth: 1))
+                                Circle().fill(LinearGradient(colors: [.cyan.opacity(0.3), .blue.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 50, height: 50).overlay(Circle().stroke(Color.cyan.opacity(0.5), lineWidth: 1))
                                 Image(systemName: "brain.head.profile").font(.system(size: 26)).foregroundColor(.cyan).shadow(color: .cyan, radius: 3)
                             }
                             Text("SYNAPSE").font(.system(size: 30, weight: .heavy, design: .monospaced)).tracking(2).foregroundColor(.white)
@@ -261,108 +313,116 @@ struct DashboardView: View {
                         }.frame(height: 120).padding(.horizontal)
                         
                         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 15) {
-                            SynapseWidget(icon: "lock.shield.fill", title: "Lock PC", color: .orange, action: { engine.sendKey("KEY:WIN+L") })
+                            SynapseWidget(icon: "lock.shield.fill", title: "Lock PC", color: .orange, action: { engine.sendShortcut("LOCK_PC") })
                             SynapseWidget(icon: "play.rectangle.fill", title: "Media Play", color: .pink, action: { engine.sendKey("MEDIA:PLAY") })
-                            SynapseWidget(icon: "waveform.path.ecg", title: "Jiggler", color: .green, action: { engine.toggleJiggler(active: true) })
-                            SynapseWidget(icon: "power", title: "Kill App", color: .red, action: { engine.sendKey("KEY:ALT+F4") })
+                            
+                            // WIDGET JIGGLER CON STATO
+                            Button(action: { UIImpactFeedbackGenerator(style: .medium).impactOccurred(); engine.toggleJiggler() }) {
+                                VStack {
+                                    Circle().fill(engine.isJigglerActive ? Color.green : Color.green.opacity(0.15)).frame(width: 50, height: 50)
+                                        .overlay(Image(systemName: "waveform.path.ecg").font(.system(size: 22)).foregroundColor(engine.isJigglerActive ? .white : .green)).padding(.bottom, 8)
+                                    Text(engine.isJigglerActive ? "Jiggler ON" : "Jiggler OFF").font(.system(size: 12, weight: .medium, design: .rounded)).foregroundColor(.white.opacity(0.9))
+                                }
+                                .frame(maxWidth: .infinity).frame(height: 110).background(Color(white: 0.12)).cornerRadius(18)
+                                .overlay(RoundedRectangle(cornerRadius: 18).stroke(engine.isJigglerActive ? Color.green : Color.clear, lineWidth: 2))
+                            }
+                            
+                            SynapseWidget(icon: "power", title: "Close App", color: .red, action: { engine.sendShortcut("CLOSE_APP") })
                         }.padding(.horizontal)
                     }
                 }
             }.navigationBarHidden(true)
         }
     }
+    func getStatusColor() -> Color { return engine.isConnected ? .green : (engine.connectionStatus.contains("SCAN") ? .orange : .gray) }
 }
 
-// --- INPUT VIEW (FIX TASTIERA & BACKSPACE) ---
+// --- INPUT VIEW (BULK TEXT + TASTIERA + TRACKPAD) ---
 struct InputView: View {
     @ObservedObject var engine: SynapseEngine
     @State private var inputMode = 0
     @State private var lastDragLocation: CGPoint? = nil
-    
-    // BACKSPACE FIX: Inizializziamo con uno spazio
     @State private var hiddenText: String = " "
+    @State private var bulkText: String = "" // Per il testo lungo
     @FocusState private var isKeyboardFocused: Bool
     
     var body: some View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
             VStack {
-                Picker("Mode", selection: $inputMode) {
-                    Text("KEYBOARD").tag(0)
-                    Text("TRACKPAD").tag(1)
-                }
-                .pickerStyle(SegmentedPickerStyle())
-                .padding().background(Color.black)
+                Picker("Mode", selection: $inputMode) { Text("KEYBOARD").tag(0); Text("TRACKPAD").tag(1) }
+                    .pickerStyle(SegmentedPickerStyle()).padding().background(Color.black)
                 
                 if inputMode == 0 {
-                    Spacer()
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 15)
-                            .fill(Color(white: 0.1))
-                            .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                        
-                        VStack {
-                            Image(systemName: "keyboard").font(.system(size: 60)).foregroundColor(.cyan.opacity(0.6))
-                            Text("TAP TO TYPE").font(.headline).fontWeight(.bold).foregroundColor(.white).padding(.top, 10)
-                            Text("Keyboard Ready").font(.caption).foregroundColor(.gray)
-                        }
-                        
-                        // TEXTFIELD FIXATO PER BACKSPACE
-                        TextField("", text: $hiddenText)
-                            .focused($isKeyboardFocused)
-                            .accentColor(.clear)
-                            .foregroundColor(.clear)
-                            .onChange(of: hiddenText) { newValue in
-                                // LOGICA BACKSPACE
-                                if newValue.isEmpty {
-                                    // Se la stringa è vuota, significa che l'utente ha cancellato lo spazio iniziale
-                                    engine.sendKey("\u{08}") // Invia codice ASCII Backspace
-                                    hiddenText = " " // Resetta subito allo spazio
+                    // --- MODALITÀ TASTIERA ---
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            
+                            // SEZIONE 1: LIVE TYPING
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 15).fill(Color(white: 0.1)).overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.cyan.opacity(0.3), lineWidth: 1))
+                                VStack {
+                                    Image(systemName: "keyboard").font(.system(size: 40)).foregroundColor(.cyan.opacity(0.6))
+                                    Text("TAP TO TYPE (LIVE)").font(.headline).fontWeight(.bold).foregroundColor(.white)
+                                    Text("Layout: ITALIAN").font(.caption).foregroundColor(.gray)
                                 }
-                                else if newValue.count > 1 {
-                                    // Se c'è più di un carattere, prende l'ultimo inserito
-                                    if let lastChar = newValue.last {
-                                        engine.sendKey(String(lastChar))
+                                TextField("", text: $hiddenText)
+                                    .focused($isKeyboardFocused).accentColor(.clear).foregroundColor(.clear)
+                                    .onChange(of: hiddenText) { newValue in
+                                        if newValue.isEmpty { engine.sendKey("\u{08}"); hiddenText = " " }
+                                        else if newValue.count > 1 { if let lastChar = newValue.last { engine.sendKey(String(lastChar)) }; hiddenText = " " }
                                     }
-                                    hiddenText = " " // Resetta allo spazio
+                            }
+                            .frame(height: 120).onTapGesture { if hiddenText.isEmpty { hiddenText = " " }; isKeyboardFocused = true }
+                            
+                            // SEZIONE 2: BULK TEXT (Testo Lungo)
+                            VStack(alignment: .leading) {
+                                Text("BULK TEXT ENTRY").font(.caption).fontWeight(.bold).foregroundColor(.gray).padding(.leading)
+                                ZStack(alignment: .topLeading) {
+                                    RoundedRectangle(cornerRadius: 15).fill(Color(white: 0.15))
+                                    if bulkText.isEmpty { Text("Paste long text here...").foregroundColor(.gray).padding(12) }
+                                    if #available(iOS 16.0, *) {
+                                        TextEditor(text: $bulkText).scrollContentBackground(.hidden).background(Color.clear).foregroundColor(.white).padding(5)
+                                    } else {
+                                        // Fallback on earlier versions
+                                    }
+                                }.frame(height: 150)
+                                
+                                Button(action: {
+                                    if !bulkText.isEmpty {
+                                        engine.sendText(bulkText)
+                                        bulkText = ""
+                                        let gen = UINotificationFeedbackGenerator(); gen.notificationOccurred(.success)
+                                    }
+                                }) {
+                                    HStack { Image(systemName: "paperplane.fill"); Text("SEND TEXT") }
+                                    .font(.headline).foregroundColor(.black).frame(maxWidth: .infinity).frame(height: 50).background(Color.cyan).cornerRadius(12)
                                 }
                             }
+                            
+                            // TASTI SPECIALI
+                            HStack(spacing: 15) {
+                                CyberButton(label: "ESC", action: { engine.sendKey("KEY:ESC") })
+                                CyberButton(label: "TAB", action: { engine.sendKey("KEY:TAB") })
+                                CyberButton(label: "WIN/CMD", action: { engine.sendKey("KEY:WIN+L") }) // Modificare in futuro se serve solo CMD
+                                CyberButton(label: "ENTER", color: .green, action: { engine.sendKey("KEY:ENTER") })
+                            }
+                        }.padding()
                     }
-                    .frame(height: 250)
-                    .padding()
-                    .onTapGesture {
-                        // Assicurati che ci sia sempre lo spazio quando apri la tastiera
-                        if hiddenText.isEmpty { hiddenText = " " }
-                        isKeyboardFocused = true
-                    }
-                    
-                    Spacer()
-                    
-                    HStack(spacing: 15) {
-                        CyberButton(label: "ESC", action: { engine.sendKey("KEY:ESC") })
-                        CyberButton(label: "TAB", action: { engine.sendKey("KEY:TAB") })
-                        CyberButton(label: "WIN", action: { engine.sendKey("KEY:WIN+L") })
-                        CyberButton(label: "ENTER", color: .green, action: { engine.sendKey("KEY:ENTER") })
-                    }.padding()
                     
                 } else {
+                    // --- MODALITÀ TRACKPAD ---
                     ZStack {
-                        RoundedRectangle(cornerRadius: 15)
-                            .fill(Color(white: 0.08))
-                            .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.cyan.opacity(0.3), lineWidth: 1))
-                            .gesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onChanged { value in
-                                        let current = value.location
-                                        if let last = self.lastDragLocation {
-                                            let dx = Int((current.x - last.x) * 1.5)
-                                            let dy = Int((current.y - last.y) * 1.5)
-                                            engine.sendMouseMove(x: dx, y: dy)
-                                        }
-                                        self.lastDragLocation = current
-                                    }
-                                    .onEnded { _ in self.lastDragLocation = nil }
-                            )
+                        RoundedRectangle(cornerRadius: 15).fill(Color(white: 0.08)).overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.cyan.opacity(0.3), lineWidth: 1))
+                            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                                let current = value.location
+                                if let last = self.lastDragLocation {
+                                    let dx = Int((current.x - last.x) * 1.5)
+                                    let dy = Int((current.y - last.y) * 1.5)
+                                    engine.sendMouseMove(x: dx, y: dy)
+                                }
+                                self.lastDragLocation = current
+                            }.onEnded { _ in self.lastDragLocation = nil })
                         VStack {
                             Image(systemName: "hand.draw.fill").font(.largeTitle).foregroundColor(.cyan.opacity(0.1))
                             Text("TOUCH SURFACE").font(.caption2).foregroundColor(.gray.opacity(0.5)).padding(.top, 5)
@@ -378,125 +438,195 @@ struct InputView: View {
     }
 }
 
-// --- MAGIC VIEW ---
-struct MagicView: View {
+// --- DECK VIEW (MACRO SYSTEM + PROFILO) ---
+struct DeckView: View {
     @ObservedObject var engine: SynapseEngine
-    @State private var showGamepad = false
+    let columns = [GridItem(.flexible()), GridItem(.flexible())]
     
     var body: some View {
         NavigationView {
-            List {
-                Section(header: Text("MOTION")) {
-                    GyroRow(icon: "gyroscope", title: "Gyro Air Mouse", desc: "Tilt to move", engine: engine)
-                }
-                Section(header: Text("AUTOMATION")) {
-                    MagicRow(icon: "waveform.path.ecg", title: "Jiggler Mode", desc: "Anti-Sleep", engine: engine, feature: "Jiggler")
-                    MagicRow(icon: "wave.3.right", title: "Proximity Lock", desc: "Auto-lock when far", engine: engine, feature: "Proximity")
-                }
-                Section(header: Text("GAMEPAD")) {
-                    Button(action: { showGamepad = true }) {
-                        HStack {
-                            Image(systemName: "gamecontroller.fill").foregroundColor(.orange)
-                            Text("Open Gamepad").foregroundColor(.white)
-                            Spacer()
-                            Image(systemName: "chevron.right").foregroundColor(.gray)
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 15) {
+                    // Macro 1: Email Utente
+                    Button(action: {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        if !engine.userEmail.isEmpty { engine.sendText(engine.userEmail) }
+                        else { engine.log("⚠️ Set email in Settings first") }
+                    }) {
+                        VStack {
+                            Image(systemName: "envelope.fill").font(.title).foregroundColor(.white).padding(.bottom, 5)
+                            Text("My Email").font(.caption).fontWeight(.bold).foregroundColor(.white.opacity(0.8))
                         }
+                        .frame(height: 100).frame(maxWidth: .infinity).background(Color.blue.opacity(0.2)).cornerRadius(16)
+                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.blue.opacity(0.5), lineWidth: 1))
                     }
+                    
+                    // Altre Macro
+                    MacroBtn(icon: "lock.fill", title: "Lock PC", color: .orange) { engine.sendShortcut("LOCK_PC") }
+                    MacroBtn(icon: "speaker.wave.3.fill", title: "Max Vol", color: .green) { engine.sendKey("MEDIA:VOL_UP"); engine.sendKey("MEDIA:VOL_UP"); engine.sendKey("MEDIA:VOL_UP") }
+                    MacroBtn(icon: "speaker.slash.fill", title: "Mute", color: .red) { engine.sendKey("MEDIA:MUTE") }
+                    MacroBtn(icon: "xmark.circle.fill", title: "Close App", color: .purple) { engine.sendShortcut("CLOSE_APP") }
+                    MacroBtn(icon: "play.pause.circle.fill", title: "Play/Pause", color: .pink) { engine.sendKey("MEDIA:PLAY") }
+                    MacroBtn(icon: "doc.on.clipboard", title: "Paste", color: .gray) {
+                        // Invia CTRL+V (Win) o CMD+V (Mac)
+                        // Nota: il firmware non ha combinazione COPY nativa, ma su Mac CMD+V spesso incolla.
+                        // Per ora mandiamo testo di prova
+                        engine.log("Shortcut Paste sent")
+                    }
+                    MacroBtn(icon: "terminal.fill", title: "Terminal", color: .black) { engine.sendText("cmd") }
                 }
+                .padding()
             }
-            .listStyle(InsetGroupedListStyle()).navigationTitle("Magic")
-            .sheet(isPresented: $showGamepad) { GamepadView(engine: engine) }
+            .navigationTitle("Macro Deck")
         }
     }
 }
 
-struct GamepadView: View {
+// Helper per pulsanti Deck
+struct MacroBtn: View {
+    let icon: String; let title: String; let color: Color; let action: () -> Void
+    var body: some View {
+        Button(action: { UIImpactFeedbackGenerator(style: .medium).impactOccurred(); action() }) {
+            VStack { Image(systemName: icon).font(.title).foregroundColor(.white).padding(.bottom, 5); Text(title).font(.caption).fontWeight(.bold).foregroundColor(.white.opacity(0.8)) }
+            .frame(height: 100).frame(maxWidth: .infinity).background(color.opacity(0.2)).cornerRadius(16).overlay(RoundedRectangle(cornerRadius: 16).stroke(color.opacity(0.5), lineWidth: 1))
+        }
+    }
+}
+
+// --- MAGIC VIEW (TV REMOTE & TOOLS) ---
+struct MagicView: View {
+    @ObservedObject var engine: SynapseEngine
+    @State private var showGamepad = false
+    @State private var showGyroController = false
+    @State private var showTVRemote = false
+    
+    var body: some View {
+        NavigationView {
+            List {
+                Section(header: Text("CONTROLLERS")) {
+                    Button(action: { showTVRemote = true }) {
+                        HStack { Image(systemName: "tv.fill").foregroundColor(.purple); Text("TV Remote Control").foregroundColor(.white); Spacer(); Image(systemName: "chevron.right").foregroundColor(.gray) }
+                    }
+                    Button(action: { showGyroController = true }) {
+                        HStack { Image(systemName: "gyroscope").foregroundColor(.cyan); Text("Air Mouse Mode").foregroundColor(.white); Spacer(); Image(systemName: "chevron.right").foregroundColor(.gray) }
+                    }
+                    Button(action: { showGamepad = true }) {
+                        HStack { Image(systemName: "gamecontroller.fill").foregroundColor(.orange); Text("Gamepad Mode").foregroundColor(.white); Spacer(); Image(systemName: "chevron.right").foregroundColor(.gray) }
+                    }
+                }
+                Section(header: Text("AUTOMATION")) {
+                    // Jiggler con stato visivo
+                    HStack {
+                        Image(systemName: "waveform.path.ecg").foregroundColor(engine.isJigglerActive ? .green : .gray)
+                        VStack(alignment: .leading) { Text("Jiggler Mode").foregroundColor(.white); Text("Status: \(engine.isJigglerActive ? "ON" : "OFF")").font(.caption).foregroundColor(.gray) }
+                        Spacer()
+                        Toggle("", isOn: $engine.isJigglerActive).onChange(of: engine.isJigglerActive) { _ in engine.toggleJiggler() }
+                    }
+                    MagicRow(icon: "wave.3.right", title: "Proximity Lock", desc: "Auto-lock when far", engine: engine, feature: "Proximity")
+                }
+            }
+            .listStyle(InsetGroupedListStyle()).navigationTitle("Magic")
+            .sheet(isPresented: $showGamepad) { GamepadView(engine: engine) }
+            .fullScreenCover(isPresented: $showGyroController) { GyroControllerView(engine: engine) }
+            .sheet(isPresented: $showTVRemote) { TVRemoteView(engine: engine) }
+        }
+    }
+}
+
+// --- NUOVA VISTA: TV REMOTE ---
+struct TVRemoteView: View {
     @ObservedObject var engine: SynapseEngine
     @Environment(\.presentationMode) var presentationMode
     
     var body: some View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
-            VStack {
-                HStack {
-                    Button("Close") { presentationMode.wrappedValue.dismiss() }
-                        .foregroundColor(.gray)
-                    Spacer()
-                }.padding()
+            VStack(spacing: 30) {
+                // Header
+                HStack { Button("Close") { presentationMode.wrappedValue.dismiss() }.foregroundColor(.gray); Spacer() }.padding()
                 
-                Spacer()
-                
-                HStack(spacing: 40) {
-                    VStack {
-                        CyberButton(label: "UP", action: { engine.sendKey("KEY:W") }).frame(width: 60)
-                        HStack {
-                            CyberButton(label: "L", action: { engine.sendKey("KEY:A") }).frame(width: 60)
-                            CyberButton(label: "R", action: { engine.sendKey("KEY:D") }).frame(width: 60)
-                        }
-                        CyberButton(label: "DN", action: { engine.sendKey("KEY:S") }).frame(width: 60)
-                    }
-                    VStack(spacing: 10) {
-                        HStack {
-                            Spacer()
-                            CyberButton(label: "Y", color: .yellow, action: { engine.sendKey("KEY:Y") }).frame(width: 60)
-                            Spacer()
-                        }
-                        HStack {
-                            CyberButton(label: "X", color: .blue, action: { engine.sendKey("KEY:X") }).frame(width: 60)
-                            Spacer()
-                            CyberButton(label: "B", color: .red, action: { engine.sendKey("KEY:B") }).frame(width: 60)
-                        }
-                        HStack {
-                            Spacer()
-                            CyberButton(label: "A", color: .green, action: { engine.sendKey("KEY:A") }).frame(width: 60)
-                            Spacer()
-                        }
-                    }
+                // Power
+                Button(action: { engine.sendKey("KEY:ALT+F4") }) { // Molte TV usano questo o Power dedicato, per ora usiamo AltF4 o inviamo nulla
+                    Image(systemName: "power").font(.largeTitle).foregroundColor(.red).padding(20)
+                        .background(Color.white.opacity(0.1)).clipShape(Circle())
                 }
+                
                 Spacer()
+                
+                // D-Pad Navigazione
+                VStack(spacing: 5) {
+                    Button(action: { engine.sendKey("KEY:W") }) { Image(systemName: "chevron.up").padding(20).background(Color.gray.opacity(0.3)).cornerRadius(10) }
+                    HStack(spacing: 40) {
+                        Button(action: { engine.sendKey("KEY:A") }) { Image(systemName: "chevron.left").padding(20).background(Color.gray.opacity(0.3)).cornerRadius(10) }
+                        Button(action: { engine.sendKey("KEY:ENTER") }) { Text("OK").fontWeight(.bold).padding(20).background(Color.white.opacity(0.2)).clipShape(Circle()) }
+                        Button(action: { engine.sendKey("KEY:D") }) { Image(systemName: "chevron.right").padding(20).background(Color.gray.opacity(0.3)).cornerRadius(10) }
+                    }
+                    Button(action: { engine.sendKey("KEY:S") }) { Image(systemName: "chevron.down").padding(20).background(Color.gray.opacity(0.3)).cornerRadius(10) }
+                }.foregroundColor(.white)
+                
+                Spacer()
+                
+                // Vol / Channel
+                HStack(spacing: 60) {
+                    VStack {
+                        Button(action: { engine.sendKey("MEDIA:VOL_UP") }) { Image(systemName: "plus").frame(width: 60, height: 60).background(Color.gray.opacity(0.2)).cornerRadius(30) }
+                        Text("VOL").font(.caption).fontWeight(.bold).foregroundColor(.gray)
+                        Button(action: { engine.sendKey("MEDIA:VOL_DN") }) { Image(systemName: "minus").frame(width: 60, height: 60).background(Color.gray.opacity(0.2)).cornerRadius(30) }
+                    }
+                    VStack {
+                        Button(action: { engine.sendKey("MEDIA:NEXT") }) { Image(systemName: "chevron.up").frame(width: 60, height: 60).background(Color.gray.opacity(0.2)).cornerRadius(30) }
+                        Text("CH").font(.caption).fontWeight(.bold).foregroundColor(.gray)
+                        Button(action: { engine.sendKey("MEDIA:PREV") }) { Image(systemName: "chevron.down").frame(width: 60, height: 60).background(Color.gray.opacity(0.2)).cornerRadius(30) }
+                    }
+                }.foregroundColor(.white)
+                
+                Spacer()
+                
+                // Media Controls
+                HStack(spacing: 40) {
+                    Button(action: { engine.sendKey("MEDIA:PREV") }) { Image(systemName: "backward.end.fill").font(.title2) }
+                    Button(action: { engine.sendKey("MEDIA:PLAY") }) { Image(systemName: "play.pause.fill").font(.largeTitle) }
+                    Button(action: { engine.sendKey("MEDIA:NEXT") }) { Image(systemName: "forward.end.fill").font(.title2) }
+                }.foregroundColor(.white).padding(.bottom, 40)
             }
         }
     }
 }
 
-// --- DECK & SETTINGS ---
-struct DeckView: View {
+// --- SETTINGS VIEW (PROFILO & OS) ---
+struct SettingsView: View {
     @ObservedObject var engine: SynapseEngine
-    let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
     
     var body: some View {
         NavigationView {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 15) {
-                    ForEach(1...12, id: \.self) { index in
-                        Button(action: {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            if index == 1 { engine.sendKey("MEDIA:VOL_UP") }
-                            else if index == 2 { engine.sendKey("MEDIA:VOL_DN") }
-                            else { engine.sendKey("KEY:M\(index)") }
-                        }) {
-                            VStack {
-                                Image(systemName: "command").font(.title2).foregroundColor(.white)
-                                Text("M\(index)").font(.caption2).fontWeight(.bold).foregroundColor(.gray)
-                            }
-                            .frame(height: 85).frame(maxWidth: .infinity).background(RoundedRectangle(cornerRadius: 16).fill(Color(white: 0.12)))
-                        }
-                    }
-                }
-                .padding()
-            }.navigationTitle("Macro Deck")
-        }
-    }
-}
-
-struct SettingsView: View {
-    @ObservedObject var engine: SynapseEngine
-    var body: some View {
-        NavigationView {
             List {
-                Section(header: Text("DEVICE INFO")) {
-                    HStack { Text("Model"); Spacer(); Text("Synapse v1.0").foregroundColor(.gray) }
+                // SEZIONE 1: CONFIGURAZIONE OS
+                Section(header: Text("TARGET SYSTEM")) {
+                    Picker("Operating System", selection: $engine.targetOS) {
+                        Text("Windows").tag("Windows")
+                        Text("macOS").tag("Mac")
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+                    Text("Current Mode: \(engine.targetOS)").font(.caption).foregroundColor(.gray)
                 }
+                
+                // SEZIONE 2: PROFILO UTENTE
+                Section(header: Text("USER PROFILE")) {
+                    TextField("Your Name", text: .constant("")) // Placeholder per future espansioni
+                    TextField("Your Email (for Macro)", text: $engine.userEmail)
+                        .autocapitalization(.none)
+                        .keyboardType(.emailAddress)
+                }
+                
+                Section(header: Text("GYRO CALIBRATION")) {
+                    VStack(alignment: .leading) {
+                        Text("Sensitivity: \(Int(engine.gyroSensitivity))")
+                        Slider(value: $engine.gyroSensitivity, in: 10...300, step: 10)
+                    }
+                    Toggle("Invert Vertical (Y) Axis", isOn: $engine.invertGyroY)
+                    Toggle("Invert Horizontal (X) Axis", isOn: $engine.invertGyroX)
+                }
+                
                 Section(header: Text("DEBUG CONSOLE")) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 5) {
@@ -506,6 +636,7 @@ struct SettingsView: View {
                         }
                     }.frame(height: 150).background(Color.black)
                 }
+                
                 Section(header: Text("CREDITS")) {
                     VStack(alignment: .leading) {
                         Text("Developed by Singh Probjot").font(.headline)
@@ -517,14 +648,24 @@ struct SettingsView: View {
     }
 }
 
-// --- COMPONENTI ---
-struct GyroRow: View {
-    let icon: String; let title: String; let desc: String; @ObservedObject var engine: SynapseEngine; @State private var isOn = false
-    var body: some View { HStack { Image(systemName: icon).foregroundColor(.cyan); VStack(alignment: .leading) { Text(title).foregroundColor(.white); Text(desc).font(.caption).foregroundColor(.gray) }; Spacer(); Toggle("", isOn: $isOn).onChange(of: isOn) { val in engine.toggleGyro(active: val) } } }
+// --- ALTRE VISTE AUSILIARIE ---
+struct GyroControllerView: View {
+    @ObservedObject var engine: SynapseEngine
+    @Environment(\.presentationMode) var presentationMode
+    @StateObject var volObserver = VolumeObserver()
+    @State private var isDragging = false
+    var body: some View {
+        ZStack { Color.black.edgesIgnoringSafeArea(.all); VStack(spacing: 30) { HStack { Button("EXIT") { engine.toggleGyro(active: false); presentationMode.wrappedValue.dismiss() }.font(.headline).foregroundColor(.red).padding(); Spacer(); Text("AIR MOUSE ACTIVE").font(.caption).fontWeight(.bold).foregroundColor(.green).padding() }; Spacer(); Image(systemName: "iphone.radiowaves.left.and.right").font(.system(size: 80)).foregroundColor(.cyan).padding(); Text("Move phone to aim").font(.headline).foregroundColor(.gray); Divider().background(Color.gray).padding(); HStack(spacing: 40) { VStack { Image(systemName: "speaker.plus.fill"); Text("VOL UP").font(.caption2); Text("Left Click").fontWeight(.bold).foregroundColor(.cyan) }; VStack { Image(systemName: "speaker.minus.fill"); Text("VOL DOWN").font(.caption2); Text("Right Click").fontWeight(.bold).foregroundColor(.orange) } }.foregroundColor(.white).padding(); Image(systemName: isDragging ? "hand.draw.fill" : "hand.draw").font(.system(size: 50)).foregroundColor(isDragging ? .white : .cyan).frame(width: 250, height: 120).background(isDragging ? Color.cyan : Color.white.opacity(0.1)).cornerRadius(20).overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.cyan, lineWidth: 2)).gesture(DragGesture(minimumDistance: 0).onChanged { _ in if !isDragging { isDragging = true; engine.log("✊ Dragging (Simulated)") } }.onEnded { _ in isDragging = false; engine.log("✋ Drag Released") }).overlay(Text("HOLD TO DRAG").font(.caption).fontWeight(.bold).offset(y: 40)); Spacer() } }.onAppear { engine.toggleGyro(active: true); volObserver.onVolumeUp = { engine.sendClick(type: "LEFT"); let gen = UIImpactFeedbackGenerator(style: .heavy); gen.impactOccurred() }; volObserver.onVolumeDown = { engine.sendClick(type: "RIGHT"); let gen = UIImpactFeedbackGenerator(style: .medium); gen.impactOccurred() } }.onDisappear { engine.toggleGyro(active: false) }
+    }
+}
+struct GamepadView: View {
+    @ObservedObject var engine: SynapseEngine
+    @Environment(\.presentationMode) var presentationMode
+    var body: some View { ZStack { Color.black.edgesIgnoringSafeArea(.all); VStack { HStack { Button("Close") { presentationMode.wrappedValue.dismiss() }.foregroundColor(.gray); Spacer() }.padding(); Spacer(); HStack(spacing: 40) { VStack { CyberButton(label: "UP", action: { engine.sendKey("KEY:W") }).frame(width: 60); HStack { CyberButton(label: "L", action: { engine.sendKey("KEY:A") }).frame(width: 60); CyberButton(label: "R", action: { engine.sendKey("KEY:D") }).frame(width: 60) }; CyberButton(label: "DN", action: { engine.sendKey("KEY:S") }).frame(width: 60) }; VStack(spacing: 10) { HStack { Spacer(); CyberButton(label: "Y", color: .yellow, action: { engine.sendKey("KEY:Y") }).frame(width: 60); Spacer() }; HStack { CyberButton(label: "X", color: .blue, action: { engine.sendKey("KEY:X") }).frame(width: 60); Spacer(); CyberButton(label: "B", color: .red, action: { engine.sendKey("KEY:B") }).frame(width: 60) }; HStack { Spacer(); CyberButton(label: "A", color: .green, action: { engine.sendKey("KEY:A") }).frame(width: 60); Spacer() } } }; Spacer() } } }
 }
 struct MagicRow: View {
-    let icon: String; let title: String; let desc: String; @ObservedObject var engine: SynapseEngine; let feature: String; @State private var isOn = false
-    var body: some View { HStack { Image(systemName: icon).foregroundColor(.green); VStack(alignment: .leading) { Text(title).foregroundColor(.white); Text(desc).font(.caption).foregroundColor(.gray) }; Spacer(); Toggle("", isOn: $isOn).onChange(of: isOn) { val in if feature == "Jiggler" { engine.toggleJiggler(active: val) } else if feature == "Proximity" { engine.toggleProximity(active: val) } } } }
+    let icon: String; let title: String; let desc: String; @ObservedObject var engine: SynapseEngine; let feature: String
+    var body: some View { HStack { Image(systemName: icon).foregroundColor(.green); VStack(alignment: .leading) { Text(title).foregroundColor(.white); Text(desc).font(.caption).foregroundColor(.gray) }; Spacer(); if feature == "Proximity" { Toggle("", isOn: $engine.isProximityActive).onChange(of: engine.isProximityActive) { val in engine.toggleProximity(active: val) } } } }
 }
 struct SynapseWidget: View {
     let icon: String; let title: String; let color: Color; let action: () -> Void
@@ -534,5 +675,4 @@ struct CyberButton: View {
     let label: String; var color: Color = .cyan; var action: () -> Void
     var body: some View { Button(action: { let gen = UIImpactFeedbackGenerator(style: .light); gen.impactOccurred(); action() }) { Text(label).font(.system(size: 14, weight: .bold, design: .monospaced)).foregroundColor(.white).frame(maxWidth: .infinity).frame(height: 55).background(color.opacity(0.15)).cornerRadius(12).overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.5), lineWidth: 1)) } }
 }
-
 struct ContentView_Previews: PreviewProvider { static var previews: some View { ContentView() } }

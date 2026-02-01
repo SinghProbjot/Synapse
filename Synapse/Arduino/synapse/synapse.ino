@@ -6,7 +6,6 @@
 #include <BLEUtils.h>
 #include <BLEServer.h>
 
-// --- UUID SINAPSE ---
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
@@ -15,11 +14,8 @@ USBHIDMouse Mouse;
 USBHIDConsumerControl Consumer;
 
 BLEServer* pServer = NULL;
-BLECharacteristic* pCharacteristic = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
-
-// Feature Jiggler
 bool jigglerActive = false;
 unsigned long lastJiggleTime = 0;
 const unsigned long JIGGLE_INTERVAL = 60000; 
@@ -29,7 +25,6 @@ class MyServerCallbacks: public BLEServerCallbacks {
       deviceConnected = true;
       Serial.println(">>> CLIENT CONNESSO <<<");
     };
-
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
       Serial.println(">>> CLIENT DISCONNESSO <<<");
@@ -37,74 +32,106 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
+// --- TRADUTTORE LAYOUT ITALIANO ---
+// Mappa i caratteri ricevuti dall'App sui tasti fisici US che generano quel simbolo su Windows/Mac IT
+void typeItalianChar(char c) {
+  switch (c) {
+    case '-': 
+      // Su Layout IT, il meno (-) si trova dove c'è lo Slash (/) US
+      Keyboard.press('/'); 
+      break;
+    case '_':
+      // Underscore è Shift + Meno (quindi Shift + Slash US)
+      Keyboard.press(KEY_LEFT_SHIFT); Keyboard.press('/'); 
+      break;
+    case '!':
+      Keyboard.press(KEY_LEFT_SHIFT); Keyboard.press('1');
+      break;
+    case '?':
+      // Su Layout IT, il ? è a destra dello 0.
+      // Sulla tastiera US, a destra dello 0 c'è il Meno (-).
+      // Quindi premiamo Shift + Meno US.
+      Keyboard.press(KEY_LEFT_SHIFT); Keyboard.press('-'); 
+      break;
+    case '(':
+      Keyboard.press(KEY_LEFT_SHIFT); Keyboard.press('8');
+      break;
+    case ')':
+      Keyboard.press(KEY_LEFT_SHIFT); Keyboard.press('9');
+      break;
+    case ':':
+      Keyboard.press(KEY_LEFT_SHIFT); Keyboard.press('.');
+      break;
+    case ';':
+      // Su Layout IT, il ; è Shift + Virgola
+      Keyboard.press(KEY_LEFT_SHIFT); Keyboard.press(',');
+      break;
+    case '@':
+      // Chiocciola su IT è AltGr + ò.
+      // La ò si trova dove c'è il ; sulla tastiera US.
+      Keyboard.press(KEY_RIGHT_ALT); Keyboard.press(';'); 
+      break;
+    case '#':
+      // Cancelletto su IT è AltGr + à.
+      // La à si trova dove c'è ' (apice) sulla tastiera US.
+      Keyboard.press(KEY_RIGHT_ALT); Keyboard.press('\'');
+      break;
+    default:
+      // Per lettere e numeri standard, inviamo il carattere direttamente
+      Keyboard.write(c);
+      return;
+  }
+  delay(10);
+  Keyboard.releaseAll();
+}
+
 void processCommand(String command) {
-  // 1. MOVIMENTO MOUSE REALE (Trackpad & Gyro)
-  // Formato atteso: "MOVE:10:-5"
+  // 1. MOVIMENTO MOUSE
   if (command.startsWith("MOVE:")) {
     int firstColon = command.indexOf(':');
     int secondColon = command.indexOf(':', firstColon + 1);
-    
     if (secondColon != -1) {
       String xStr = command.substring(firstColon + 1, secondColon);
       String yStr = command.substring(secondColon + 1);
-      
-      // Conversione Stringa -> Intero
-      int x = xStr.toInt();
-      int y = yStr.toInt();
-      
-      Mouse.move(x, y);
+      Mouse.move(xStr.toInt(), yStr.toInt());
     }
     return;
   }
 
-  // 2. CLICK MOUSE
+  // 2. CLICK & MEDIA & KEY SPECIALI
   if (command == "CLICK:LEFT")  Mouse.click(MOUSE_LEFT);
   else if (command == "CLICK:RIGHT") Mouse.click(MOUSE_RIGHT);
-
-  // 3. MEDIA CONTROL
   else if (command == "MEDIA:VOL_UP") Consumer.press(CONSUMER_CONTROL_VOLUME_INCREMENT);
   else if (command == "MEDIA:VOL_DN") Consumer.press(CONSUMER_CONTROL_VOLUME_DECREMENT);
   else if (command == "MEDIA:MUTE")   Consumer.press(CONSUMER_CONTROL_MUTE);
   else if (command == "MEDIA:PLAY")   Consumer.press(CONSUMER_CONTROL_PLAY_PAUSE);
-  
-  // 4. TASTI SPECIALI (Macro e Navigazione)
   else if (command == "KEY:ESC")   { Keyboard.press(KEY_ESC); Keyboard.releaseAll(); }
   else if (command == "KEY:TAB")   { Keyboard.press(KEY_TAB); Keyboard.releaseAll(); }
   else if (command == "KEY:ENTER") { Keyboard.press(KEY_RETURN); Keyboard.releaseAll(); }
-  else if (command == "KEY:WIN+L") { 
-    Keyboard.press(KEY_LEFT_GUI); Keyboard.press('l'); delay(100); Keyboard.releaseAll();
-  }
-  else if (command == "KEY:ALT+F4") {
-    Keyboard.press(KEY_LEFT_ALT); Keyboard.press(KEY_F4); delay(100); Keyboard.releaseAll();
-  }
-  
-  // 5. CONFIGURAZIONI MAGIC
+  else if (command == "KEY:WIN+L") { Keyboard.press(KEY_LEFT_GUI); Keyboard.press('l'); delay(100); Keyboard.releaseAll(); }
+  else if (command == "KEY:ALT+F4") { Keyboard.press(KEY_LEFT_ALT); Keyboard.press(KEY_F4); delay(100); Keyboard.releaseAll(); }
   else if (command.startsWith("CFG:Jiggler:")) {
-     if (command.indexOf(":1") != -1) jigglerActive = true;
-     else jigglerActive = false;
+     if (command.indexOf(":1") != -1) jigglerActive = true; else jigglerActive = false;
   }
 
-  // 6. SCRITTURA TASTIERA REALE (Lettere singole)
-  // Se arriva "a", "b", "C", scrive quel carattere
+  // 3. SCRITTURA TESTO (Con Mappatura Italiana)
   else if (command.length() == 1) {
-    Keyboard.write(command.charAt(0));
+    char c = command.charAt(0);
+    typeItalianChar(c);
   }
 }
 
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       String rxValue = pCharacteristic->getValue();
-      if (rxValue.length() > 0) {
-        processCommand(rxValue);
-      }
+      if (rxValue.length() > 0) processCommand(rxValue);
     }
 };
 
 void setup() {
   Serial.begin(115200);
   
-  // NOME USB REALE (Cosi il Mac la vede bella)
-  USB.productName("Synapse HID");
+  USB.productName("Synapse HID IT");
   USB.manufacturerName("Synapse Labs");
   USB.begin();
   
@@ -113,12 +140,11 @@ void setup() {
   Consumer.begin();
 
   BLEDevice::init("Synapse Dongle");
-  pServer = BLEDevice::createServer();
+  BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
   
-  // Abilitiamo PROPERTY_WRITE_NR per velocità massima (fondamentale per il mouse fluido)
-  pCharacteristic = pService->createCharacteristic(
+  BLECharacteristic *pCharacteristic = pService->createCharacteristic(
                       CHARACTERISTIC_UUID,
                       BLECharacteristic::PROPERTY_READ   |
                       BLECharacteristic::PROPERTY_WRITE  |
@@ -134,11 +160,10 @@ void setup() {
   pAdvertising->setMinPreferred(0x06); 
   BLEDevice::startAdvertising();
   
-  Serial.println("SYNAPSE OS v3.0 READY");
+  Serial.println("SYNAPSE IT READY");
 }
 
 void loop() {
-  // LOGICA JIGGLER
   if (jigglerActive) {
     unsigned long currentMillis = millis();
     if (currentMillis - lastJiggleTime >= JIGGLE_INTERVAL) {
@@ -146,10 +171,8 @@ void loop() {
       Mouse.move(1, 0); delay(50); Mouse.move(-1, 0);
     }
   }
-
-  // AUTORECONNECT
   if (!deviceConnected && oldDeviceConnected) {
-      delay(500); pServer->startAdvertising(); oldDeviceConnected = deviceConnected;
+      delay(500); BLEDevice::startAdvertising(); oldDeviceConnected = deviceConnected;
   }
   if (deviceConnected && !oldDeviceConnected) {
       oldDeviceConnected = deviceConnected;
